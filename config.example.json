@@ -1,0 +1,51 @@
+{
+  "discord_token": "PASTE_DISCORD_BOT_TOKEN",
+  "guild_id": 0,
+
+  "channels": {
+    "tap": 0,
+    "spin": 0,
+    "trade": 0,
+    "admin_ai": 0,
+    "leaderboard": 0,
+    "promocodes": 0,
+    "duel": 0,
+    "upgrade": "—",
+    "craft": "—"
+  },
+
+  "channel_names": {
+    "tap": "👆・click",
+    "spin": "🎰・roll",
+    "trade": "🤝・trade",
+    "admin_ai": "🛠️・admin",
+    "leaderboard": "🏆・board",
+    "promocodes": "🎁・promos",
+    "duel": "⚔️・duel",
+    "upgrade": "🔧・upgrades",
+    "craft": "⚗️・crafts"
+  },
+
+  "roles": {
+    "admin": 0,
+    "top1": 0,
+    "player": 0,
+    "x5_coins": 0,
+    "x2_coins": 0,
+    "x5_luck": 0
+  },
+
+  "ai": {
+    "api_key": "PASTE_AI_API_KEY",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini"
+  },
+
+  "game": {
+    "tap_coins_base": 1,
+    "tap_cooldown_seconds": 2,
+    "spin_cooldown_seconds": 8,
+    "leaderboard_interval_seconds": 3600,
+    "leaderboard_size": 10
+  }
+}

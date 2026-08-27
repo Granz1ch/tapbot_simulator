@@ -1,0 +1,13 @@
+config.json
+data/
+__pycache__/
+*.py[cod]
+*.sqlite
+*.db
+.venv/
+venv/
+.env
+uploads/
+.arena/
+.cache/
+*.log
