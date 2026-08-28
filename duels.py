@@ -35,9 +35,9 @@ def parse_stake(raw: str) -> tuple[Stake | None, str]:
     if raw.isdigit():
         n = int(raw)
         if n < MIN_COINS:
-            return None, f"минимум {MIN_COINS} монет"
+            return None, f"Minimum stake: {MIN_COINS} coins"
         if n > MAX_COINS:
-            return None, f"максимум {MAX_COINS} монет"
+            return None, f"Maximum stake: {MAX_COINS} coins"
         return Stake("coins", amount=n), ""
     name, qty = raw, 1
     parts = raw.split()
@@ -49,11 +49,11 @@ def parse_stake(raw: str) -> tuple[Stake | None, str]:
         name = " ".join(parts[:-1])
     card = resolve_card(name)
     if not card:
-        return None, "ставка: `50` или `golden_tap` или `wooden_tap 2`"
+        return None, "Stake: `50`, `golden_tap`, or `wooden_tap 2`"
     if card.rarity == "exclusive":
-        return None, "эксклюзив (Titan / Crown) нельзя ставить на дуэль"
+        return None, "Exclusive cards (Titan / Crown) cannot be staked in a duel"
     if qty > 5:
-        return None, "не больше 5 одинаковых карт в ставке"
+        return None, "You can stake no more than 5 copies of the same card"
     return Stake("card", amount=qty, card_id=card.id), ""
 
 
@@ -118,36 +118,36 @@ class ChallengeView(discord.ui.View):
         for item in self.children:
             item.disabled = True  # type: ignore
 
-    @discord.ui.button(label="Принять", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         d = self.duel
         if interaction.user.id != d.b:
-            await interaction.response.send_message("Это не твой вызов.", ephemeral=True)
+            await interaction.response.send_message("This challenge is not for you.", ephemeral=True)
             return
         if not d.live:
-            await interaction.response.send_message("Вызов уже не действует.", ephemeral=True)
+            await interaction.response.send_message("This challenge is no longer active.", ephemeral=True)
             return
         if not has_stake(d.b, d.stake):
-            await interaction.response.send_message(f"Нет ставки: {d.stake.label()}", ephemeral=True)
+            await interaction.response.send_message(f"You do not have the stake: {d.stake.label()}", ephemeral=True)
             return
         if not lock_stake(d.b, d.stake):
-            await interaction.response.send_message("Не смог списать ставку.", ephemeral=True)
+            await interaction.response.send_message("Could not lock the stake.", ephemeral=True)
             return
         d.locked_b = True
         for item in self.children:
             item.disabled = True  # type: ignore
         self.stop()
         await interaction.response.edit_message(
-            content=f"⚔️ {self.names[d.a]} vs {self.names[d.b]} · банк {d.stake.label()} ×2",
+            content=f"⚔️ {self.names[d.a]} vs {self.names[d.b]} · pot {d.stake.label()} ×2",
             view=self,
         )
         await run_match(interaction.followup, interaction.message, d, self.names)
 
-    @discord.ui.button(label="Отклонить", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
     async def decline(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         d = self.duel
         if interaction.user.id not in (d.a, d.b):
-            await interaction.response.send_message("Не твой вызов.", ephemeral=True)
+            await interaction.response.send_message("This challenge is not for you.", ephemeral=True)
             return
         d.live = False
         if d.locked_a:
@@ -156,8 +156,8 @@ class ChallengeView(discord.ui.View):
         for item in self.children:
             item.disabled = True  # type: ignore
         self.stop()
-        who = "отклонил" if interaction.user.id == d.b else "отменил"
-        await interaction.response.edit_message(content=f"🚫 {interaction.user.display_name} {who} дуэль. Ставка возвращена.", view=self)
+        who = "declined" if interaction.user.id == d.b else "cancelled"
+        await interaction.response.edit_message(content=f"🚫 {interaction.user.display_name} {who} the duel. The stake was returned.", view=self)
 
 
 class TapRoundView(discord.ui.View):
@@ -173,10 +173,10 @@ class TapRoundView(discord.ui.View):
         uid = interaction.user.id
         d = self.duel
         if uid not in (d.a, d.b):
-            await interaction.response.send_message("Смотри со стороны.", ephemeral=True)
+            await interaction.response.send_message("You are only a spectator.", ephemeral=True)
             return
         if time.monotonic() < self.armed_at:
-            await interaction.response.send_message("Рано. Жди сигнал.", ephemeral=True)
+            await interaction.response.send_message("Too early. Wait for the signal.", ephemeral=True)
             return
         async with self.lock:
             if self.winner is not None:
@@ -209,8 +209,8 @@ async def run_match(
                 break
             wait = random.uniform(1.4, 3.6)
             wait_msg = await channel.send(
-                f"Раунд **{rnd}/3** · {names[d.a]} `{d.scores[d.a]}:{d.scores[d.b]}` {names[d.b]}\n"
-                f"Ждите… не жми заранее."
+                f"Round **{rnd}/3** · {names[d.a]} `{d.scores[d.a]}:{d.scores[d.b]}` {names[d.b]}\n"
+                f"Wait… do not tap early."
             )
             await asyncio.sleep(wait)
             armed = time.monotonic()
@@ -224,29 +224,29 @@ async def run_match(
             if view.winner:
                 d.scores[view.winner] += 1
                 await go.edit(
-                    content=f"⚡ {names[view.winner]} забирает раунд {rnd}  ·  "
+                    content=f"⚡ {names[view.winner]} wins round {rnd}  ·  "
                     f"`{d.scores[d.a]}:{d.scores[d.b]}`"
                 )
             else:
-                await go.edit(content=f"💤 Раунд {rnd} в ничью — никто не успел.")
+                await go.edit(content=f"💤 Round {rnd} is a draw — nobody tapped in time.")
             await asyncio.sleep(0.8)
 
         sa, sb = d.scores[d.a], d.scores[d.b]
         if sa == sb:
             give_stake(d.a, d.stake)
             give_stake(d.b, d.stake)
-            text = f"🤝 Ничья `{sa}:{sb}`. Ставки возвращены."
+            text = f"🤝 Draw `{sa}:{sb}`. Stakes returned."
         else:
             winner = d.a if sa > sb else d.b
             give_stake(winner, d.stake, times=2)
             text = (
-                f"🏆 **{names[winner]}** побеждает `{sa}:{sb}` и забирает банк {d.stake.label()} ×2"
+                f"🏆 **{names[winner]}** wins `{sa}:{sb}` and takes the {d.stake.label()} pot ×2"
             )
         await channel.send(text)
     except Exception:
         _refund_both(d)
         try:
-            await channel.send("Дуэль сломалась — ставки возвращены.")
+            await channel.send("The duel failed — stakes were returned.")
         except discord.HTTPException:
             pass
     finally:
@@ -266,23 +266,23 @@ def _refund_both(d: Duel) -> None:
 async def start_challenge(interaction: discord.Interaction, rival: discord.Member, stake_raw: str) -> None:
     me = interaction.user
     if not isinstance(me, discord.Member):
-        await interaction.response.send_message("Только на сервере.", ephemeral=True)
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
         return
     if rival.bot or rival.id == me.id:
-        await interaction.response.send_message("Нельзя с ботом или собой.", ephemeral=True)
+        await interaction.response.send_message("You cannot duel a bot or yourself.", ephemeral=True)
         return
     if me.id in BUSY or rival.id in BUSY:
-        await interaction.response.send_message("Кто-то уже в дуэли.", ephemeral=True)
+        await interaction.response.send_message("One of the players is already in a duel.", ephemeral=True)
         return
     stake, err = parse_stake(stake_raw)
     if not stake:
         await interaction.response.send_message(f"❌ {err}", ephemeral=True)
         return
     if not has_stake(me.id, stake):
-        await interaction.response.send_message(f"У тебя нет {stake.label()}", ephemeral=True)
+        await interaction.response.send_message(f"You do not have {stake.label()}", ephemeral=True)
         return
     if not lock_stake(me.id, stake):
-        await interaction.response.send_message("Не списал ставку.", ephemeral=True)
+        await interaction.response.send_message("Could not lock the stake.", ephemeral=True)
         return
 
     _busy_add(me.id, rival.id)
@@ -293,9 +293,9 @@ async def start_challenge(interaction: discord.Interaction, rival: discord.Membe
     if stake.kind == "card":
         extra = f"\n{format_card(CARDS[stake.card_id])}"
     await interaction.response.send_message(
-        f"⚔️ {me.mention} вызывает {rival.mention}\n"
-        f"Ставка с каждой стороны: {stake.label()}{extra}\n"
-        f"3 раунда TAP. Кто быстрее жмёт после сигнала — тот раунд.\n"
-        f"{rival.mention}, 45 сек на ответ.",
+        f"⚔️ {me.mention} challenges {rival.mention}\n"
+        f"Stake for each player: {stake.label()}{extra}\n"
+        f"Best of 3 TAP rounds. The faster tap after the signal wins the round.\n"
+        f"{rival.mention}, you have 45 seconds to respond.",
         view=view,
     )

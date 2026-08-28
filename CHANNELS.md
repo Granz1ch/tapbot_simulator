@@ -29,6 +29,7 @@
 | `⚔️・duel` | `/duel` | `duel` | `1541772835834302514` |
 | `🔧・upgrades` | `/upgrade` или сообщение | `upgrade` | `1541863852008935576` |
 | `⚗️・crafts` | `/crafts` или сообщение | `craft` | `1541863885588537404` |
+| `psx-shop` | PSX REBORN: OG pet shop, `/psx_buy` | `psx_shop` | `1542920557387841576` |
 | `✨・enchant` | `/enchant` (UPD3, пока не кодить) | `enchant` | — |
 
 ---
@@ -82,6 +83,7 @@
 ⚔️・duel
 🔧・upgrades
 ⚗️・crafts
+psx-shop
 ✨・enchant
 
 ✦ ＳＨＡＲＤＳ

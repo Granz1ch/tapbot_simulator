@@ -133,6 +133,7 @@ def init_db() -> None:
             """
         )
     _ensure_upd3_tables()
+    _ensure_upd35_tables()
 
 
 def ensure_user(db: sqlite3.Connection, user_id: int) -> None:
@@ -398,13 +399,13 @@ def create_promo(
 ) -> tuple[bool, str]:
     code = normalize_code(code)
     if not code or len(code) > 32:
-        return False, "код 1–32 символа без пробелов"
+        return False, "Code must be 1–32 characters with no spaces"
     if reward_type not in ("coins", "card", "role"):
         return False, "reward_type: coins | card | role"
     with get_db() as db:
         exists = db.execute("SELECT 1 FROM promos WHERE code = ?", (code,)).fetchone()
         if exists:
-            return False, "такой промокод уже есть"
+            return False, "A promo code with that name already exists"
         db.execute(
             """
             INSERT INTO promos (code, max_uses, reward_type, reward_value, reward_qty, duration_seconds, created_by)
@@ -433,11 +434,11 @@ def update_promo(code: str, **fields: Any) -> tuple[bool, str]:
         sets.append(f"{k} = ?")
         vals.append(v)
     if not sets:
-        return False, "нечего менять"
+        return False, "There is nothing to update"
     with get_db() as db:
         row = db.execute("SELECT 1 FROM promos WHERE code = ?", (code,)).fetchone()
         if not row:
-            return False, "промокод не найден"
+            return False, "Promo code not found"
         db.execute(f"UPDATE promos SET {', '.join(sets)} WHERE code = ?", (*vals, code))
     return True, code
 
@@ -637,6 +638,250 @@ def craft_custom_off(recipe_id: int) -> bool:
     with get_db() as db:
         cur = db.execute("UPDATE craft_custom SET active = 0 WHERE id = ?", (recipe_id,))
         return cur.rowcount > 0
+
+
+def psx_catalog_upsert(items: list[dict[str, Any]]) -> None:
+    """Seed or refresh the PSX catalog without resetting global claims."""
+    with get_db() as db:
+        for item in items:
+            db.execute(
+                """
+                INSERT INTO psx_pets (pet_id, name, price_shards, asset_key)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(pet_id) DO UPDATE SET
+                    name = excluded.name,
+                    price_shards = excluded.price_shards,
+                    asset_key = excluded.asset_key
+                """,
+                (
+                    str(item["pet_id"]),
+                    str(item["name"]),
+                    int(item["price_shards"]),
+                    str(item["asset_key"]),
+                ),
+            )
+
+
+def psx_catalog_rows() -> list[dict[str, Any]]:
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM psx_pets ORDER BY rowid"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def psx_reserve_purchase(user_id: int, pet_id: str, code: str) -> tuple[str, dict[str, Any] | None]:
+    """Atomically charge shards and reserve the one global copy of a pet.
+
+    The returned status is one of ``ok``, ``unknown_pet``, ``already_claimed``
+    or ``insufficient_shards``. A purchase starts in ``pending_dm`` and must
+    be marked complete only after Discord accepts the DM.
+    """
+    if not code:
+        raise ValueError("receipt code must not be empty")
+    with get_db() as db:
+        # Serialize buyers so two simultaneous commands cannot claim one pet.
+        db.execute("BEGIN IMMEDIATE")
+        pet = db.execute(
+            "SELECT * FROM psx_pets WHERE pet_id = ?",
+            (pet_id,),
+        ).fetchone()
+        if not pet:
+            return "unknown_pet", None
+        if pet["claimed_by"] is not None:
+            return "already_claimed", dict(pet)
+
+        ensure_user(db, user_id)
+        balance = db.execute(
+            "SELECT COALESCE(shards, 0) AS shards FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if int(balance["shards"]) < int(pet["price_shards"]):
+            return "insufficient_shards", dict(pet)
+
+        updated = db.execute(
+            """
+            UPDATE users
+            SET shards = shards - ?
+            WHERE user_id = ? AND COALESCE(shards, 0) >= ?
+            """,
+            (pet["price_shards"], user_id, pet["price_shards"]),
+        )
+        if updated.rowcount != 1:
+            return "insufficient_shards", dict(pet)
+
+        claimed = db.execute(
+            """
+            UPDATE psx_pets
+            SET claimed_by = ?, claimed_at = CURRENT_TIMESTAMP
+            WHERE pet_id = ? AND claimed_by IS NULL
+            """,
+            (user_id, pet_id),
+        )
+        if claimed.rowcount != 1:
+            # BEGIN IMMEDIATE makes this unreachable, but never commit a
+            # charge if the invariant is broken.
+            raise RuntimeError("PSX pet was claimed during reservation")
+
+        try:
+            # Reuse the audit row from a reservation whose DM failed. The
+            # schema keeps one row per pet, while a refunded row is safe to
+            # recycle for a later successful attempt.
+            refunded = db.execute(
+                "SELECT id FROM psx_purchases WHERE pet_id = ? AND status = 'refunded'",
+                (pet_id,),
+            ).fetchone()
+            if refunded:
+                purchase_id = int(refunded["id"])
+                db.execute(
+                    """
+                    UPDATE psx_purchases
+                    SET user_id = ?, code = ?, price_shards = ?, status = 'pending_dm',
+                        created_at = CURRENT_TIMESTAMP, dm_sent_at = NULL, refunded_at = NULL
+                    WHERE id = ? AND status = 'refunded'
+                    """,
+                    (user_id, code, pet["price_shards"], purchase_id),
+                )
+            else:
+                cur = db.execute(
+                    """
+                    INSERT INTO psx_purchases (pet_id, user_id, code, price_shards)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (pet_id, user_id, code, pet["price_shards"]),
+                )
+                purchase_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            # A receipt-code collision is retried by the service layer. The
+            # transaction context rolls back the shard charge and the claim.
+            raise
+
+        result = dict(pet)
+        result.update(
+            {
+                "purchase_id": purchase_id,
+                "user_id": user_id,
+                "code": code,
+                "status": "pending_dm",
+                "price_shards": int(pet["price_shards"]),
+            }
+        )
+        return "ok", result
+
+
+def psx_mark_dm_sent(purchase_id: int) -> bool:
+    with get_db() as db:
+        cur = db.execute(
+            """
+            UPDATE psx_purchases
+            SET status = 'completed', dm_sent_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'pending_dm'
+            """,
+            (purchase_id,),
+        )
+        return cur.rowcount == 1
+
+
+def psx_refund_pending(purchase_id: int) -> str:
+    """Refund a reservation if its receipt DM could not be sent."""
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        purchase = db.execute(
+            "SELECT * FROM psx_purchases WHERE id = ?",
+            (purchase_id,),
+        ).fetchone()
+        if not purchase:
+            return "not_found"
+        if purchase["status"] != "pending_dm":
+            return str(purchase["status"])
+
+        db.execute(
+            "UPDATE users SET shards = COALESCE(shards, 0) + ? WHERE user_id = ?",
+            (purchase["price_shards"], purchase["user_id"]),
+        )
+        released = db.execute(
+            """
+            UPDATE psx_pets
+            SET claimed_by = NULL, claimed_at = NULL
+            WHERE pet_id = ? AND claimed_by = ?
+            """,
+            (purchase["pet_id"], purchase["user_id"]),
+        )
+        if released.rowcount != 1:
+            raise RuntimeError("PSX reservation is not owned by its buyer")
+        db.execute(
+            """
+            UPDATE psx_purchases
+            SET status = 'refunded', refunded_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'pending_dm'
+            """,
+            (purchase_id,),
+        )
+        return "refunded"
+
+
+def psx_purchase(purchase_id: int) -> dict[str, Any] | None:
+    with get_db() as db:
+        row = db.execute(
+            "SELECT * FROM psx_purchases WHERE id = ?",
+            (purchase_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def psx_purchase_for_user(user_id: int) -> list[dict[str, Any]]:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT p.*, s.name AS pet_name, s.asset_key
+            FROM psx_purchases p
+            JOIN psx_pets s ON s.pet_id = p.pet_id
+            WHERE p.user_id = ?
+            ORDER BY p.id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def psx_pet_locked(pet_id: str) -> bool:
+    """Whether a PSX pet is unavailable for purchase or future crafting."""
+    with get_db() as db:
+        row = db.execute(
+            "SELECT claimed_by FROM psx_pets WHERE pet_id = ?",
+            (pet_id,),
+        ).fetchone()
+        return bool(row and row["claimed_by"] is not None)
+
+
+def _ensure_upd35_tables() -> None:
+    """Create the persistent state used by the PSX REBORN: OG shop."""
+    with get_db() as db:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS psx_pets (
+                pet_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                price_shards INTEGER NOT NULL CHECK(price_shards > 0),
+                asset_key TEXT NOT NULL,
+                claimed_by INTEGER,
+                claimed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS psx_purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pet_id TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                code TEXT NOT NULL UNIQUE,
+                price_shards INTEGER NOT NULL CHECK(price_shards > 0),
+                status TEXT NOT NULL DEFAULT 'pending_dm',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                dm_sent_at TEXT,
+                refunded_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_psx_purchases_user
+                ON psx_purchases(user_id);
+            """
+        )
 
 
 def _ensure_upd3_tables() -> None:
@@ -862,6 +1107,3 @@ def ref_stats(user_id: int) -> int:
     with get_db() as db:
         row = db.execute("SELECT invited FROM referrals WHERE user_id = ?", (user_id,)).fetchone()
         return int(row["invited"]) if row else 0
-
-
-_ensure_upd3_tables()

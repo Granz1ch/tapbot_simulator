@@ -48,6 +48,7 @@ Hoist (отдельный блок в сайдбаре): ADMIN, TOP-1, ивен�
 | `⚔️・duel` | `/duel @игрок ставка` — PvP TAP | duel |
 | `🔧・upgrades` | `/upgrade` или любое сообщение — магазин | upgrade |
 | `⚗️・crafts` | `/crafts` или любое сообщение — верстак | craft |
+| `psx-shop` | PSX REBORN: OG pet shop — `/psx_shop` и `/psx_buy` | psx_shop |
 
 Права: писать все (PLAYER). В `board` писать только бот. В `duel` — вызовы и TAP-кнопки.
 
@@ -88,6 +89,7 @@ Hoist (отдельный блок в сайдбаре): ADMIN, TOP-1, ивен�
 🎁・promos
 🏆・board
 ⚔️・duel
+psx-shop
 
 ✦ ＭＡＲＫＥＴ
 🤝・trade
