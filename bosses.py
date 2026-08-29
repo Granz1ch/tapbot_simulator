@@ -14,7 +14,7 @@ from cards import BOSS_CARD_ID, CARDS, COMMON_IDS, format_card
 TIERS = {
     "common": {
         "hp": 500,
-        "title": "Common · Ржавый кран",
+        "title": "Common · Rusty Faucet",
         "color": 0x95A5A6,
         "coin_pot": 120,
         "card_drops": 3,
@@ -23,7 +23,7 @@ TIERS = {
     },
     "uncommon": {
         "hp": 1500,
-        "title": "Uncommon · Медный колосс",
+        "title": "Uncommon · Copper Colossus",
         "color": 0x2ECC71,
         "coin_pot": 380,
         "card_drops": 6,
@@ -32,7 +32,7 @@ TIERS = {
     },
     "rare": {
         "hp": 2500,
-        "title": "Rare · Титан",
+        "title": "Rare · Titan",
         "color": 0x9B59B6,
         "coin_pot": 750,
         "card_drops": 4,
@@ -116,25 +116,25 @@ def embed_for(state: dict[str, Any] | None = None) -> discord.Embed:
     s = state or _state()
     spec = TIERS.get(s.get("tier") or "common", TIERS["common"])
     hp, mx = int(s.get("hp") or 0), int(s.get("max_hp") or 1)
-    e = discord.Embed(title=f"⚔️ Босс — {spec['title']}", color=spec["color"])
+    e = discord.Embed(title=f"⚔️ Boss — {spec['title']}", color=spec["color"])
     e.description = f"`{hp_bar(hp, mx)}`  **{hp}/{mx}** HP"
     if spec["exclusive"]:
         e.add_field(
-            name="Добыча Rare",
-            value=f"монеты + обычные карты · **одному** случайному — {CARDS[BOSS_CARD_ID].emoji} Titan Tap",
+            name="Rare loot",
+            value=f"coins + common cards · **one random hitter** gets {CARDS[BOSS_CARD_ID].emoji} Titan Tap",
             inline=False,
         )
     else:
         e.add_field(
-            name="Добыча",
-            value=f"банк **{spec['coin_pot']}** 💰 · **{spec['card_drops']}** common-карт(ы) участникам",
+            name="Loot",
+            value=f"**{spec['coin_pot']}** 💰 coin pot · **{spec['card_drops']}** common cards for participants",
             inline=False,
         )
     top = db.boss_hits()[:5]
     if top:
-        lines = [f"`#{i}` <@{r['user_id']}> — {r['damage']} dmg" for i, r in enumerate(top, 1)]
-        e.add_field(name="Урон", value="\n".join(lines), inline=False)
-    e.set_footer(text="Пиши в click — бьёшь босса. Следующий через ~35 мин после смерти.")
+        lines = [f"`#{i}` <@{r['user_id']}> — {r['damage']} damage" for i, r in enumerate(top, 1)]
+        e.add_field(name="Damage", value="\n".join(lines), inline=False)
+    e.set_footer(text="Type in the click channel to attack. Next boss in about 35 minutes after defeat.")
     return e
 
 
@@ -183,23 +183,23 @@ def payout() -> dict[str, Any]:
 
 def format_loot(result: dict[str, Any]) -> str:
     spec = result["spec"]
-    lines = [f"💀 **{spec['title']}** пал."]
+    lines = [f"💀 **{spec['title']}** has been defeated."]
     if result["exclusive"]:
         card = CARDS[BOSS_CARD_ID]
         lines.append(
-            f"🌑 {format_card(card)}\nдосталась <@{result['exclusive']}> (случайно среди бивших, вес = урон)"
+            f"🌑 {format_card(card)}\nAwarded to <@{result['exclusive']}> (randomly selected among hitters, weighted by damage)"
         )
     top = sorted(result["coins"].items(), key=lambda x: -x[1])[:8]
     if top:
         bits = [f"<@{u}> +{c}💰" for u, c in top]
-        lines.append("Монеты: " + " · ".join(bits))
+        lines.append("Coins: " + " · ".join(bits))
     if result["cards"]:
         bits = []
         for u, ids in list(result["cards"].items())[:8]:
             names = ", ".join(CARDS[i].emoji for i in ids)
             bits.append(f"<@{u}> {names}")
-        lines.append("Карты: " + " · ".join(bits))
-    lines.append(f"Следующий босс примерно через {COOLDOWN // 60} мин.")
+        lines.append("Cards: " + " · ".join(bits))
+    lines.append(f"Next boss in about {COOLDOWN // 60} minutes.")
     return "\n".join(lines)
 
 

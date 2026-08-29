@@ -31,21 +31,21 @@ CARDS: dict[str, Card] = {
         "Titan Tap",
         "🌑",
         "exclusive",
-        "Шестая особая. Не падает с ролла — только с Rare-босса, одному.",
+        "The exclusive sixth card. Never drops from rolls — only from a Rare boss, for one hitter.",
     ),
     "crown_tap": Card(
         "crown_tap",
         "Crown Tap",
         "⚜️",
         "exclusive",
-        "Карта TOP-1. Номер и ник навсегда. Держишь — x2 coins и x2 luck. Один раз в жизни.",
+        "The TOP-1 card. Serial number and nickname are permanent. Holding it grants x2 coins and x2 luck. One per player.",
     ),
     "shield_tap": Card(
         "shield_tap",
         "Shield Tap",
         "🛡️",
         "exclusive",
-        "Иммунитет к событию «Драка»: нельзя ударить и нельзя быть целью. Нейтрал.",
+        "Immunity during Brawl: cannot attack and cannot be targeted. Neutral.",
     ),
 }
 

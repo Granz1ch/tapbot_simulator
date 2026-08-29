@@ -21,6 +21,7 @@ import crafts
 import duels
 import upgrades
 import upd3
+import psx_shop
 from cards import BOSS_CARD_ID, CARDS, COMMON_IDS, CROWN_CARD_ID, EXCLUSIVE_IDS, RARE_IDS, SHIELD_CARD_ID, UNIQUE_IDS, card_image, format_card, resolve_card, sell_price
 from datetime import date
 
@@ -107,7 +108,7 @@ def channel_style(name: str) -> str:
 
 
 def role_id(key: str) -> int:
-    return int(CFG["roles"][key])
+    return int((CFG.get("roles") or {}).get(key) or 0)
 
 
 def has_role(member: discord.Member, key: str) -> bool:
@@ -169,9 +170,9 @@ def require_channel(interaction: discord.Interaction, key: str) -> str | None:
     cid = ch(key)
     pretty = channel_style(key)
     if not cid:
-        return f"Канал **{pretty}** ещё не привязан: в config.json у `channels.{key}` стоит прочерк. Создай канал и вставь ID."
+        return f"Channel **{pretty}** is not configured yet. Set `channels.{key}` in config.json to the channel ID."
     if interaction.channel_id != cid:
-        return f"Только в <#{cid}> (`{pretty}`)."
+        return f"Use this command only in <#{cid}> (`{pretty}`)."
     return None
 
 
@@ -205,6 +206,7 @@ class TapBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         db.init_db()
+        psx_shop.ensure_catalog()
         self.leaderboard_loop.start()
         self.expire_roles_loop.start()
         self.boss_loop.start()
@@ -332,7 +334,7 @@ def profile_embed(member: discord.abc.User, data: dict | None) -> discord.Embed:
     e.add_field(name="🃏 Cards", value="\n".join(lines) if lines else "— empty —", inline=False)
     bonus = collection_bonus(data.get("inventory"))
     if bonus:
-        e.add_field(name="📚 Коллекция", value=f"+{bonus} 💰 к каждому тапу", inline=False)
+        e.add_field(name="📚 Collection", value=f"+{bonus} 💰 per tap", inline=False)
     if data.get("daily_streak"):
         e.add_field(name="🔥 Daily streak", value=str(data["daily_streak"]))
     if getattr(member, "display_avatar", None):
@@ -358,6 +360,90 @@ async def ensure_player_role(member: discord.Member) -> None:
                 await member.add_roles(role, reason="Joined Tap Simulator")
             except discord.HTTPException:
                 pass
+
+
+def psx_shop_embeds() -> tuple[list[discord.Embed], list[discord.File]]:
+    states = psx_shop.catalog_state()
+    main = discord.Embed(
+        title="PSX REBORN: OG Shop",
+        description=(
+            "Buy pets with **Crystal Shards** 💎. Each pet has **one copy for the entire server**.\n"
+            "Use `/psx_buy <pet_name>` to purchase. The receipt code is sent by DM and must be shown only to an administrator."
+        ),
+        color=0xF1C40F,
+    )
+    for state in states:
+        pet = state["pet"]
+        status = "SOLD OUT — cannot be bought or crafted" if state["claimed"] else "AVAILABLE — 1 copy left"
+        main.add_field(
+            name=f"{pet.name} · {pet.price_shards} 💎",
+            value=f"ID: `{pet.pet_id}`\n**{status}**",
+            inline=False,
+        )
+
+    embeds = [main]
+    files: list[discord.File] = []
+    for state in states:
+        pet = state["pet"]
+        path = psx_shop.pet_image_path(pet)
+        if path is None:
+            continue
+        filename = path.name
+        image_embed = discord.Embed(
+            title=pet.name,
+            description=f"{pet.price_shards} Crystal Shards 💎 · {'SOLD OUT' if state['claimed'] else 'AVAILABLE'}",
+            color=0x7DCEA0 if not state["claimed"] else 0x7F8C8D,
+        )
+        image_embed.set_image(url=f"attachment://{filename}")
+        embeds.append(image_embed)
+        files.append(discord.File(path, filename=filename))
+    return embeds, files
+
+
+async def handle_psx_shop_message(message: discord.Message, member: discord.Member) -> None:
+    if bot.on_cd(member.id, "psx_shop_ui", 10) > 0:
+        return
+    await ensure_player_role(member)
+    embeds, files = psx_shop_embeds()
+    kwargs = {"embeds": embeds, "delete_after": 90}
+    if files:
+        kwargs["files"] = files
+    try:
+        await message.channel.send(**kwargs)
+    except discord.HTTPException:
+        pass
+
+
+def psx_receipt_embed(result: psx_shop.PurchaseResult) -> tuple[discord.Embed, discord.File | None]:
+    pet = result.pet
+    assert pet is not None
+    embed = discord.Embed(
+        title="PSX REBORN: OG — Purchase Receipt",
+        description=(
+            f"You purchased **{pet.name}** for **{result.price_shards} Crystal Shards** 💎.\n\n"
+            f"Receipt code: `{result.code}`\n\n"
+            "Show this code **only to a server administrator**. Do not post it in a public channel or share it with other players.\n"
+            "This pet is now globally reserved and cannot be purchased or crafted by anyone else."
+        ),
+        color=0xF1C40F,
+    )
+    path = psx_shop.pet_image_path(pet)
+    if path is None:
+        return embed, None
+    embed.set_image(url=f"attachment://{path.name}")
+    return embed, discord.File(path, filename=path.name)
+
+
+async def psx_pet_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return [
+        app_commands.Choice(
+            name=f"{pet.name} — {pet.price_shards} 💎"[:100],
+            value=pet.pet_id,
+        )
+        for pet in psx_shop.autocomplete_names(current)[:25]
+    ]
 
 
 @bot.event
@@ -442,6 +528,10 @@ async def on_message(message: discord.Message) -> None:
         await handle_crystal_ex(message, member)
         return
 
+    if cid and cid == ch("psx_shop"):
+        await handle_psx_shop_message(message, member)
+        return
+
     if cid and cid == ch("ref"):
         await handle_ref_message(message, member)
         return
@@ -464,7 +554,7 @@ async def handle_tap(message: discord.Message, member: discord.Member) -> None:
         except discord.HTTPException:
             pass
     gained = tap_gain_for(member)
-    # Драка: reply на игрока вместо обычного тапа
+    # Brawl: replying to a player replaces the regular tap
     if upd3.brawl_active() and message.reference and message.reference.message_id:
         target = message.reference.resolved
         if target is None:
@@ -488,7 +578,7 @@ async def handle_tap(message: discord.Message, member: discord.Member) -> None:
                     pass
                 if took:
                     await message.channel.send(
-                        f"⚔️ {member.mention} забирает **{took}** 💰 у {victim.mention}",
+                        f"⚔️ {member.mention} steals **{took}** 💰 from {victim.mention}",
                         delete_after=8,
                     )
                 return
@@ -517,7 +607,7 @@ async def handle_tap(message: discord.Message, member: discord.Member) -> None:
     if streak >= 5 or random.random() < 0.08:
         extra = f" · combo x{streak}" if streak >= 3 else ""
         await message.channel.send(
-            f"{member.mention} +{gained} 💰 (всего {total}){extra}",
+            f"{member.mention} +{gained} 💰 (total {total}){extra}",
             delete_after=8,
         )
 
@@ -538,11 +628,11 @@ async def handle_spin(message: discord.Message, member: discord.Member) -> None:
     db.bump_spins(member.id)
     color = 0x9B59B6 if card.rarity == "rare" else 0x3498DB
     e = discord.Embed(
-        title="Прокрутка карточки",
-        description=format_card(card) + f"\nТеперь у тебя: **×{qty}**",
+        title="Card Roll",
+        description=format_card(card) + f"\nYou now have: **×{qty}**",
         color=color,
     )
-    footer = {5: "x5 LUCK", 2: "x2 LUCK"}.get(luck, "default luck — только 5 common")
+    footer = {5: "x5 LUCK", 2: "x2 LUCK"}.get(luck, "default luck — common cards only")
     e.set_footer(text=footer)
     remember(member)
     f = card_file(card_id)
@@ -564,18 +654,18 @@ async def handle_trade_message(message: discord.Message, member: discord.Member)
     if not m:
         return
     if not message.reference or not message.reference.message_id:
-        await message.reply("Ответь (`Reply`) на сообщение игрока, которому отдаёшь.", mention_author=False)
+        await message.reply("Reply to the player's message to send them an item.", mention_author=False)
         return
     try:
         target_msg = message.reference.resolved or await message.channel.fetch_message(
             message.reference.message_id
         )
     except discord.HTTPException:
-        await message.reply("Не нашёл исходное сообщение.", mention_author=False)
+        await message.reply("I could not find the original message.", mention_author=False)
         return
     target = target_msg.author
     if target.bot or target.id == member.id:
-        await message.reply("Нельзя отдать боту или себе.", mention_author=False)
+        await message.reply("You cannot send items to a bot or to yourself.", mention_author=False)
         return
     payload = m.group(1).strip()
     ok, text = do_give(member.id, target.id, payload)
@@ -589,7 +679,7 @@ def do_give(from_id: int, to_id: int, payload: str) -> tuple[bool, str]:
         ok, err = db.transfer_coins(from_id, to_id, amount)
         if not ok:
             return False, f"❌ {err}"
-        return True, f"✅ Передано **{amount}** 💰 → <@{to_id}>"
+        return True, f"✅ Sent **{amount}** 💰 → <@{to_id}>"
 
     # card [xN]
     parts = payload.split()
@@ -603,23 +693,23 @@ def do_give(from_id: int, to_id: int, payload: str) -> tuple[bool, str]:
         name = " ".join(parts[:-1])
     card = resolve_card(name)
     if not card:
-        return False, "❌ Не понял предмет. Пример: `/give 50` или `/give golden_tap` или `/give neon_tap x2`"
+        return False, "❌ Unknown item. Example: `/give 50`, `/give golden_tap`, or `/give neon_tap x2`"
     extra = ""
     if card.id in UNIQUE_IDS:
         owned = db.unique_of(from_id, card.id)
         if not owned:
-            return False, "❌ нет этой уникальной карты"
+            return False, "❌ You do not own this unique card"
         u = owned[0]
-        extra = f" · `#{u['serial']}` {u['inscribed_name']} (надпись навсегда)"
+        extra = f" · `#{u['serial']}` {u['inscribed_name']} (permanent inscription)"
         qty = 1
     ok, err = db.transfer_card(from_id, to_id, card.id, qty)
     if not ok:
         moved = db.transfer_enchanted(from_id, to_id, card.id, qty)
         if moved:
-            extra = extra or " · с чарами"
-            return True, f"✅ Передано {card.emoji} **{card.name}** ×{moved}{extra} → <@{to_id}>"
+            extra = extra or " · enchanted"
+            return True, f"✅ Sent {card.emoji} **{card.name}** ×{moved}{extra} → <@{to_id}>"
         return False, f"❌ {err}"
-    return True, f"✅ Передано {card.emoji} **{card.name}** ×{qty}{extra} → <@{to_id}>"
+    return True, f"✅ Sent {card.emoji} **{card.name}** ×{qty}{extra} → <@{to_id}>"
 
 
 def parse_card_qty(payload: str) -> tuple[str, int]:
@@ -639,15 +729,15 @@ def do_sell(user_id: int, payload: str) -> tuple[bool, str]:
     name, qty = parse_card_qty(payload)
     card = resolve_card(name)
     if not card:
-        return False, "❌ карта? пример: `/sell wooden_tap` или `/sell crystal_tap 3`"
+        return False, "❌ Unknown card. Example: `/sell wooden_tap` or `/sell crystal_tap 3`"
     price = sell_price(card.id)
     if price is None:
-        return False, "❌ rare нельзя продать. только первые 5 common, до 50 💰 за штуку"
+        return False, "❌ Rare and exclusive cards cannot be sold. Only the first 5 common cards can be sold, up to 50 💰 each."
     if not db.take_card(user_id, card.id, qty):
-        return False, "❌ нет столько карт"
+        return False, "❌ You do not have enough cards"
     total = price * qty
     coins = db.add_coins(user_id, total)
-    return True, f"✅ Продано {card.emoji} **{card.name}** ×{qty} → **+{total}** 💰 (баланс {coins})"
+    return True, f"✅ Sold {card.emoji} **{card.name}** ×{qty} → **+{total}** 💰 (balance {coins})"
 
 
 def role_key_from_mention(text: str) -> str | None:
@@ -687,20 +777,20 @@ def resolve_role_key(text: str) -> str | None:
 def hierarchy_error(guild: discord.Guild, key: str) -> str | None:
     me = guild.me
     if me is None:
-        return "бот не в кэше гильдии"
+        return "The bot is not cached in this server"
     if not me.guild_permissions.manage_roles:
-        return "у бота нет права Manage Roles — включи в роли бота"
+        return "The bot does not have Manage Roles permission"
     rid = role_id(key) if key in CFG["roles"] else 0
     role = guild.get_role(rid) if rid else None
     if not role:
-        return f"роль `{key}` не найдена"
+        return f"Role `{key}` was not found"
     if role >= me.top_role:
         return (
-            f"роль **{role.name}** выше или равна роли бота **{me.top_role.name}**. "
-            f"В настройках сервера перетащи роль бота ВЫШЕ {role.name}"
+            f"Role **{role.name}** is higher than or equal to the bot's top role **{me.top_role.name}**. "
+            f"Move the bot role ABOVE {role.name} in the server settings"
         )
     if role.is_default():
-        return "нельзя выдать @everyone"
+        return "The @everyone role cannot be granted"
     return None
 
 
@@ -928,23 +1018,23 @@ def format_tool_result(result: dict) -> str:
         return f"❌ {result.get('error') or result}"
     parts = ["✅"]
     if "affected" in result:
-        parts.append(f"выдано игрокам: **{result['affected']}**")
+        parts.append(f"affected players: **{result['affected']}**")
     if "role" in result:
-        parts.append(f"роль `{result['role']}`")
+        parts.append(f"role `{result['role']}`")
     if result.get("expires_at"):
-        parts.append(f"до <t:{int(result['expires_at'])}:R>")
+        parts.append(f"until <t:{int(result['expires_at'])}:R>")
     elif result.get("role"):
-        parts.append("навсегда")
+        parts.append("permanently")
     if "amount" in result:
         parts.append(f"{result['amount']} 💰")
     if "card" in result:
-        parts.append(f"карта `{result['card']}` ×{result.get('qty', 1)}")
+        parts.append(f"card `{result['card']}` ×{result.get('qty', 1)}")
     if "coins" in result and "amount" not in result:
-        parts.append(f"баланс {result['coins']}")
+        parts.append(f"balance {result['coins']}")
     if result.get("failed"):
-        parts.append(f"(ошибок: {result['failed']})")
+        parts.append(f"({result['failed']} errors)")
     if result.get("promo"):
-        parts.append(f"промо `{result['promo']}`")
+        parts.append(f"promo `{result['promo']}`")
     if result.get("promos_text"):
         return "✅ " + result["promos_text"]
     return " ".join(parts)
@@ -955,8 +1045,8 @@ async def handle_admin_ai(message: discord.Message) -> None:
     bot_id = bot.user.id if bot.user else 0
     if not text:
         await message.reply(
-            "Пустое сообщение (нужен Message Content Intent **или** пинг бота).\n"
-            "Либо слэш: `/admin_all` → роль всем → `x2_coins` → `30`"
+            "Empty message (the Message Content Intent or a bot mention is required).\n"
+            "Or use the slash command: `/admin_all` → role for everyone → `x2_coins` → `30`"
         )
         return
 
@@ -968,7 +1058,7 @@ async def handle_admin_ai(message: discord.Message) -> None:
         return
 
     if not CFG["ai"].get("api_key") or str(CFG["ai"]["api_key"]).startswith("PASTE"):
-        await message.reply("Не понял. Примеры: `всем x2_coins на 30 сек` · `/admin_all`")
+        await message.reply("I did not understand. Examples: `everyone x2_coins for 30 sec` · `/admin_all`")
         return
 
     history = [{"role": "user", "content": f"Admin: {text}"}]
@@ -977,8 +1067,8 @@ async def handle_admin_ai(message: discord.Message) -> None:
             data = await ai_admin.chat(CFG, history, use_tools=False)
         except Exception as exc:
             await message.reply(
-                f"ИИ недоступен (`{exc}`). Сделай так:\n"
-                "`всем x2_coins на 30 сек`\n`/admin_all` роль всем → x2_coins → 30"
+                f"AI is unavailable (`{exc}`). Use:\n"
+                "`everyone x2_coins for 30 sec`\n`/admin_all` role for everyone → x2_coins → 30"
             )
             return
         raw_out = (data["choices"][0]["message"].get("content") or "").strip()
@@ -987,14 +1077,14 @@ async def handle_admin_ai(message: discord.Message) -> None:
             result = await run_admin_tool(message.guild, action.get("action") or "", action)
             await message.reply(format_tool_result(result))
             return
-        await message.reply((raw_out or "Не понял запрос.")[:1900])
+        await message.reply((raw_out or "I did not understand the request.")[:1900])
 
 
 async def run_admin_tool(guild: discord.Guild, name: str, args: dict) -> dict:
     uid = int(args.get("user_id") or 0)
     if name == "give_coins":
         if not uid:
-            return {"ok": False, "error": "не указан игрок"}
+            return {"ok": False, "error": "No player was specified"}
         total = db.add_coins(uid, int(args["amount"]))
         return {"ok": True, "coins": total, "amount": int(args["amount"])}
     if name == "give_card":
@@ -1013,7 +1103,7 @@ async def run_admin_tool(guild: discord.Guild, name: str, args: dict) -> dict:
         if herr:
             return {"ok": False, "error": herr}
         if not uid:
-            return {"ok": False, "error": "не указан игрок"}
+            return {"ok": False, "error": "No player was specified"}
         member = guild.get_member(uid)
         if member is None:
             try:
@@ -1021,7 +1111,7 @@ async def run_admin_tool(guild: discord.Guild, name: str, args: dict) -> dict:
             except discord.HTTPException:
                 return {"ok": False, "error": "member not found"}
         if member.bot:
-            return {"ok": False, "error": "нельзя выдать роль боту"}
+            return {"ok": False, "error": "A role cannot be granted to a bot"}
         rid = role_id(key) if key in CFG["roles"] else 0
         role = guild.get_role(rid) if rid else None
         if not role:
@@ -1029,7 +1119,7 @@ async def run_admin_tool(guild: discord.Guild, name: str, args: dict) -> dict:
         try:
             await member.add_roles(role, reason="Tap Simulator admin")
         except discord.Forbidden:
-            return {"ok": False, "error": hierarchy_error(guild, key) or "403 Forbidden — подними роль бота выше"}
+            return {"ok": False, "error": hierarchy_error(guild, key) or "403 Forbidden — move the bot role higher"}
         except discord.HTTPException as e:
             return {"ok": False, "error": str(e)}
         expires = time.time() + float(duration) if duration else None
@@ -1064,7 +1154,7 @@ async def run_admin_tool(guild: discord.Guild, name: str, args: dict) -> dict:
     if name == "list_promos":
         rows = db.list_promos()
         if not rows:
-            return {"ok": True, "promos_text": "промокодов нет"}
+            return {"ok": True, "promos_text": "No promo codes"}
         lines = []
         for p in rows:
             cap = p["max_uses"] or "∞"
@@ -1086,12 +1176,15 @@ async def run_admin_tool(guild: discord.Guild, name: str, args: dict) -> dict:
                     parsed.append(c.id)
             ings = parsed
         if not ings or len(set(ings)) < 3:
-            return {"ok": False, "error": "нужно ≥3 разных карты"}
-        out = resolve_card(str(args.get("result") or args.get("card_id") or ""))
+            return {"ok": False, "error": "You need at least 3 different cards"}
+        result_query = str(args.get("result") or args.get("card_id") or "")
+        if psx_shop.resolve_pet(result_query):
+            return {"ok": False, "error": "PSX REBORN: OG pets cannot be crafted"}
+        out = resolve_card(result_query)
         if not out:
-            return {"ok": False, "error": "неизвестный результат"}
+            return {"ok": False, "error": "Unknown result"}
         if out.id in UNIQUE_IDS:
-            return {"ok": False, "error": "Crown Tap нельзя крафтить"}
+            return {"ok": False, "error": "Crown Tap cannot be crafted"}
         ok, why = crafts.recipe_legal(ings, out.id)
         if not ok:
             return {"ok": False, "error": why}
@@ -1109,15 +1202,15 @@ async def run_admin_tool(guild: discord.Guild, name: str, args: dict) -> dict:
     if name in ("craft_list", "list_crafts"):
         rows = db.craft_custom_list(include_off=True)
         if not rows:
-            return {"ok": True, "promos_text": "кастом-рецептов нет"}
+            return {"ok": True, "promos_text": "No custom recipes"}
         lines = []
         for r in rows[:20]:
-            who = f"user {r['target_user_id']}" if r["target_user_id"] else "все"
+            who = f"user {r['target_user_id']}" if r["target_user_id"] else "everyone"
             lines.append(f"#{r['id']} [{r['active']}] {r['tag']} {who} → {r['result']}")
         return {"ok": True, "promos_text": "\n".join(lines)}
     if name in ("craft_off", "disable_craft"):
         ok = db.craft_custom_off(int(args.get("recipe_id") or args.get("id") or 0))
-        return {"ok": ok, "error": None if ok else "нет рецепта"}
+        return {"ok": ok, "error": None if ok else "Recipe not found"}
     return {"ok": False, "error": "unknown tool"}
 
 
@@ -1146,7 +1239,7 @@ async def run_admin_all(guild: discord.Guild, name: str, args: dict) -> dict:
         return {
             "ok": False,
             "error": last_err
-            or "никого не нашёл. Включи SERVER MEMBERS INTENT и подними роль бота выше X2 COINS",
+            or "No players found. Enable SERVER MEMBERS INTENT and move the bot role above X2 COINS",
         }
     out: dict = {"ok": True, "affected": ok_n, "failed": fail}
     if name == "give_coins_all":
@@ -1169,12 +1262,12 @@ def admin_create_promo(args: dict) -> dict:
     if rtype == "card":
         card = resolve_card(rval)
         if not card:
-            return {"ok": False, "error": "неизвестная карта"}
+            return {"ok": False, "error": "Unknown card"}
         rval = card.id
     if rtype == "role":
         key = resolve_role_key(rval) or rval
         if key not in CFG["roles"]:
-            return {"ok": False, "error": f"роль {rval} неизвестна"}
+            return {"ok": False, "error": f"Unknown role: {rval}"}
         rval = key
     ok, msg = db.create_promo(
         str(args.get("code") or ""),
@@ -1211,11 +1304,11 @@ async def apply_promo_reward(guild: discord.Guild, member: discord.Member, promo
     if kind == "coins":
         amt = int(promo["reward_value"])
         total = db.add_coins(member.id, amt)
-        return f"+{amt} 💰 (баланс {total})"
+        return f"+{amt} 💰 (balance {total})"
     if kind == "card":
         card = resolve_card(str(promo["reward_value"]))
         if not card:
-            return "карта не найдена"
+            return "Card not found"
         qty = db.add_card(member.id, card.id, int(promo["reward_qty"] or 1))
         return f"{format_card(card)} (×{qty})"
     if kind == "role":
@@ -1230,9 +1323,9 @@ async def apply_promo_reward(guild: discord.Guild, member: discord.Member, promo
             },
         )
         if not res.get("ok"):
-            return f"роль не выдалась: {res.get('error')}"
-        return f"роль `{key}`"
-    return "неизвестная награда"
+            return f"Role was not granted: {res.get('error')}"
+        return f"role `{key}`"
+    return "Unknown reward"
 
 
 
@@ -1263,7 +1356,7 @@ async def handle_ref_message(message: discord.Message, member: discord.Member) -
     if text.lower() in ("/ref", "ref"):
         code = db.ref_code_for(member.id)
         await message.reply(
-            f"Твой код: `{code}` · приглашено {db.ref_stats(member.id)}\nНапиши этот код в этот канал с нового аккаунта.",
+            f"Your code: `{code}` · successful invites: {db.ref_stats(member.id)}\nA new player should enter this code in this channel.",
             mention_author=False,
         )
         return
@@ -1282,18 +1375,18 @@ async def handle_promo_message(message: discord.Message, member: discord.Member)
     ok, reason, promo = db.redeem_promo(text, member.id)
     if not ok:
         msg = {
-            "not_found": "❌ такого промокода нет",
-            "already": "❌ ты уже активировал этот промокод",
-            "exhausted": "❌ активации закончились",
-        }.get(reason, "❌ не вышло")
+            "not_found": "❌ That promo code does not exist",
+            "already": "❌ You have already redeemed this promo code",
+            "exhausted": "❌ This promo code has no uses left",
+        }.get(reason, "❌ The operation failed")
         await message.reply(msg, mention_author=False)
         return
     await ensure_player_role(member)
     reward = await apply_promo_reward(message.guild, member, promo or {})
     left = ""
     if promo and promo["max_uses"]:
-        left = f" · осталось {max(0, promo['max_uses'] - promo['uses'] - 1)}/{promo['max_uses']}"
-    await message.reply(f"✅ Промокод `{db.normalize_code(text)}` · {reward}{left}", mention_author=False)
+        left = f" · {max(0, promo['max_uses'] - promo['uses'] - 1)}/{promo['max_uses']} uses left"
+    await message.reply(f"✅ Promo code `{db.normalize_code(text)}` · {reward}{left}", mention_author=False)
 
 
 async def resolve_player(guild: discord.Guild, user_id: int, cached_name: str | None = None):
@@ -1305,7 +1398,7 @@ async def resolve_player(guild: discord.Guild, user_id: int, cached_name: str | 
             member = None
     if member:
         remember(member)
-    return member, (member.display_name if member else (cached_name or f"игрок {user_id}"))
+    return member, (member.display_name if member else (cached_name or f"player {user_id}"))
 
 
 async def refresh_leaderboard() -> None:
@@ -1327,9 +1420,9 @@ async def refresh_leaderboard() -> None:
             elif row.get("avatar_url"):
                 top_avatar = row["avatar_url"]
         lines.append(f"{medal} **{name}** — **{row['coins']}** 💰")
-    desc = "\n".join(lines) if lines else "Пока пусто. Пишите в tap-канал."
+    desc = "\n".join(lines) if lines else "No players yet. Type in the click channel."
     embed = discord.Embed(title="🏆 Tap Simulator — Leaderboard", description=desc, color=0xF1C40F)
-    embed.set_footer(text="Обновляется каждый час · ник и монеты")
+    embed.set_footer(text="Updates every hour · name and coins")
     if top_avatar:
         embed.set_thumbnail(url=top_avatar)
 
@@ -1376,9 +1469,9 @@ async def refresh_leaderboard() -> None:
                     e = discord.Embed(
                         title="⚜️ Crown Tap",
                         description=(
-                            f"{champ.mention} впервые стал TOP-1 и получил {card.emoji} **{card.name}**\n"
+                            f"{champ.mention} became TOP-1 for the first time and received {card.emoji} **{card.name}**\n"
                             f"`#{awarded['serial']}` · **{awarded['inscribed_name']}**\n"
-                            f"Надпись вечная. Суперспособность, пока карта у тебя: **x2 coins + x2 luck**. Повторно не выдаётся."
+                            f"The inscription is permanent. While you hold the card: **x2 coins + x2 luck**. It will not be awarded again."
                         ),
                         color=0xF1C40F,
                     )
@@ -1417,12 +1510,12 @@ class InventoryView(discord.ui.View):
 
 class CardSelect(discord.ui.Select):
     def __init__(self, options: list[discord.SelectOption]):
-        super().__init__(placeholder="Открыть карточку…", options=options)
+        super().__init__(placeholder="Open a card…", options=options)
 
     async def callback(self, interaction: discord.Interaction):
         view: InventoryView = self.view  # type: ignore
         if interaction.user.id != view.owner_id:
-            await interaction.response.send_message("Это не твой инвентарь.", ephemeral=True)
+            await interaction.response.send_message("This is not your inventory.", ephemeral=True)
             return
         cid = self.values[0]
         card = CARDS[cid]
@@ -1439,7 +1532,7 @@ class CardSelect(discord.ui.Select):
             await interaction.response.send_message(embed=e, ephemeral=True)
 
 
-@bot.tree.command(name="profile", description="Монеты и карточки")
+@bot.tree.command(name="profile", description="View coins and cards")
 async def slash_profile(interaction: discord.Interaction, user: discord.User | None = None):
     target = user or interaction.user
     if isinstance(target, discord.Member):
@@ -1459,14 +1552,14 @@ async def slash_profile(interaction: discord.Interaction, user: discord.User | N
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="inventory", description="Инвентарь с картинками карт")
+@bot.tree.command(name="inventory", description="View your card inventory")
 async def slash_inventory(interaction: discord.Interaction):
     data = db.get_user(interaction.user.id) or {"inventory": {}}
     inv = data.get("inventory") or {}
     if not inv:
-        await interaction.response.send_message("Инвентарь пуст — крути карты в roll-канале.", ephemeral=True)
+        await interaction.response.send_message("Your inventory is empty — roll cards in the roll channel.", ephemeral=True)
         return
-    e = discord.Embed(title=f"Инвентарь — {interaction.user.display_name}", color=0x8E44AD)
+    e = discord.Embed(title=f"Inventory — {interaction.user.display_name}", color=0x8E44AD)
     for cid, qty in inv.items():
         card = CARDS.get(cid)
         if card:
@@ -1482,7 +1575,7 @@ async def slash_inventory(interaction: discord.Interaction):
     await interaction.response.send_message(**kwargs)
 
 
-@bot.tree.command(name="daily", description="Ежедневная награда")
+@bot.tree.command(name="daily", description="Claim your daily reward")
 async def slash_daily(interaction: discord.Interaction):
     if isinstance(interaction.user, discord.Member):
         remember(interaction.user)
@@ -1490,22 +1583,22 @@ async def slash_daily(interaction: discord.Interaction):
     ok, streak, pay = db.claim_daily(interaction.user.id, date.today().isoformat())
     if not ok:
         await interaction.response.send_message(
-            f"Уже забирал сегодня. Серия: **{streak}** дн.",
+            f"You already claimed today. Streak: **{streak}** days",
             ephemeral=True,
         )
         return
     await interaction.response.send_message(
-        f"✅ Daily **+{pay}** 💰 · серия **{streak}** день"
+        f"✅ Daily reward **+{pay}** 💰 · streak **{streak}** day(s)"
     )
 
 
-@bot.tree.command(name="cards", description="Список карточек")
+@bot.tree.command(name="cards", description="List all cards")
 async def slash_cards(interaction: discord.Interaction):
     commons = "\n".join(format_card(CARDS[i]) for i in COMMON_IDS)
     rares = "\n".join(format_card(CARDS[i]) for i in RARE_IDS)
-    e = discord.Embed(title="Карточки Tap Simulator", color=0x8E44AD)
-    e.add_field(name="Common (без удачи)", value=commons, inline=False)
-    e.add_field(name="Rare (нужна удача / апгрейд luck)", value=rares, inline=False)
+    e = discord.Embed(title="Tap Simulator Cards", color=0x8E44AD)
+    e.add_field(name="Common (no luck required)", value=commons, inline=False)
+    e.add_field(name="Rare (luck or luck upgrade required)", value=rares, inline=False)
     e.add_field(
         name="Exclusive",
         value="\n".join(format_card(CARDS[i]) for i in EXCLUSIVE_IDS),
@@ -1514,31 +1607,31 @@ async def slash_cards(interaction: discord.Interaction):
     await interaction.response.send_message(embed=e, ephemeral=True)
 
 
-@bot.tree.command(name="give", description="Передать монеты или карточку (лучше через reply в trade-канале)")
-@app_commands.describe(target="Кому", item="50 или golden_tap или neon_tap x2")
+@bot.tree.command(name="give", description="Send coins or a card (reply in the trade channel is recommended)")
+@app_commands.describe(target="Recipient", item="50, golden_tap, or neon_tap x2")
 async def slash_give(interaction: discord.Interaction, target: discord.Member, item: str):
     if interaction.channel_id != ch("trade") and ch("trade"):
         await interaction.response.send_message(
-            f"Трейд только в <#{ch('trade')}> (или reply `/give …` там).",
+            f"Trading is only available in <#{ch('trade')}> (or reply with `/give …` there).",
             ephemeral=True,
         )
         return
     if target.id == interaction.user.id:
-        await interaction.response.send_message("Себе нельзя.", ephemeral=True)
+        await interaction.response.send_message("You cannot send something to yourself.", ephemeral=True)
         return
     ok, text = do_give(interaction.user.id, target.id, item)
     await interaction.response.send_message(text)
 
 
-@bot.tree.command(name="sell", description="Продать common-карту за монеты (макс. 50 за штуку)")
-@app_commands.describe(item="wooden_tap или crystal_tap 2")
+@bot.tree.command(name="sell", description="Sell a common card for coins (up to 50 each)")
+@app_commands.describe(item="wooden_tap or crystal_tap 2")
 async def slash_sell(interaction: discord.Interaction, item: str):
     ok, text = do_sell(interaction.user.id, item)
     await interaction.response.send_message(text)
 
 
 
-@bot.tree.command(name="enchant", description="Зачаровать карту (монеты или удача)")
+@bot.tree.command(name="enchant", description="Enchant a card (coins or luck)")
 async def slash_enchant(interaction: discord.Interaction):
     err = require_channel(interaction, "enchant")
     if err:
@@ -1553,26 +1646,26 @@ async def slash_enchant(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="brawl", description="[ADMIN] Драка в click")
-@app_commands.describe(minutes="длительность, по умолчанию 2")
+@bot.tree.command(name="brawl", description="[ADMIN] Start a brawl in click")
+@app_commands.describe(minutes="Duration in minutes, default 2")
 async def slash_brawl(interaction: discord.Interaction, minutes: float = 2.0):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     if upd3.brawl_active():
-        await interaction.response.send_message("Драка уже идёт.", ephemeral=True)
+        await interaction.response.send_message("A brawl is already active.", ephemeral=True)
         return
     tap = interaction.guild.get_channel(ch("tap")) if interaction.guild else None
     if interaction.channel_id != ch("tap"):
-        await interaction.response.send_message("Только в click.", ephemeral=True)
+        await interaction.response.send_message("Use this command in the click channel.", ephemeral=True)
         return
     end = upd3.start_brawl(minutes)
     await interaction.response.send_message(
-        f"⚔️ **Драка!** {minutes} мин. Reply на сообщение игрока = удар на размер вашего тапа. До <t:{int(end)}:R>"
+        f"⚔️ **Brawl!** {minutes} min. Reply to a player message to hit for your tap amount. Ends <t:{int(end)}:R>"
     )
 
 
-@bot.tree.command(name="ref", description="Реферальный код")
+@bot.tree.command(name="ref", description="Get your referral code")
 async def slash_ref(interaction: discord.Interaction):
     err = require_channel(interaction, "ref")
     if err:
@@ -1580,13 +1673,13 @@ async def slash_ref(interaction: discord.Interaction):
         return
     code = db.ref_code_for(interaction.user.id)
     await interaction.response.send_message(
-        f"Код: `{code}` · засчитано приглашений: **{db.ref_stats(interaction.user.id)}**\n"
-        f"Новый игрок пишет код в этот канал, затем тапает в click.",
+        f"Code: `{code}` · successful invites: **{db.ref_stats(interaction.user.id)}**\n"
+        f"A new player enters the code in this channel, then taps in click.",
         ephemeral=True,
     )
 
 
-@bot.tree.command(name="shardshop", description="Магазин осколков")
+@bot.tree.command(name="shardshop", description="Open the shard shop")
 async def slash_shardshop(interaction: discord.Interaction):
     err = require_channel(interaction, "shards")
     if err:
@@ -1599,7 +1692,82 @@ async def slash_shardshop(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="upgrade", description="Купить улучшения за монеты")
+@bot.tree.command(name="psx_shop", description="View the PSX REBORN: OG pet shop")
+async def slash_psx_shop(interaction: discord.Interaction):
+    err = require_channel(interaction, "psx_shop")
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+    embeds, files = psx_shop_embeds()
+    kwargs = {"embeds": embeds}
+    if files:
+        kwargs["files"] = files
+    await interaction.response.send_message(**kwargs)
+
+
+@bot.tree.command(name="psx_buy", description="Buy a PSX REBORN: OG pet with Crystal Shards")
+@app_commands.describe(pet_name="Pet name or ID")
+@app_commands.autocomplete(pet_name=psx_pet_autocomplete)
+async def slash_psx_buy(interaction: discord.Interaction, pet_name: str):
+    err = require_channel(interaction, "psx_shop")
+    if err:
+        await interaction.response.send_message(err, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    result = psx_shop.purchase_pet(interaction.user.id, pet_name)
+    if not result.ok:
+        messages = {
+            "unknown_pet": "Unknown pet. Use `/psx_shop` to view the catalog.",
+            "already_claimed": "This pet is already sold out. It cannot be purchased or crafted by anyone else.",
+            "insufficient_shards": (
+                f"You need **{result.price_shards} Crystal Shards** 💎 to buy this pet, "
+                f"but you do not have enough."
+            ),
+            "receipt_collision": "I could not create a unique receipt code. Please try again.",
+        }
+        await interaction.followup.send(messages.get(result.reason, "The purchase could not be completed."), ephemeral=True)
+        return
+
+    embed, receipt_file = psx_receipt_embed(result)
+    try:
+        if receipt_file:
+            await interaction.user.send(embed=embed, file=receipt_file)
+        else:
+            await interaction.user.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        # The pet and shards are restored when Discord refuses the receipt DM.
+        try:
+            refund_status = psx_shop.refund_if_dm_failed(int(result.purchase_id or 0))
+        except Exception:
+            refund_status = "error"
+        if refund_status == "refunded":
+            await interaction.followup.send(
+                "I could not send you a DM, so the purchase was cancelled and your Crystal Shards were refunded. "
+                "Please enable DMs from server members and try again.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "I could not send the receipt DM. Please contact an administrator before trying again.",
+                ephemeral=True,
+            )
+        return
+
+    if not psx_shop.mark_receipt_delivered(int(result.purchase_id or 0)):
+        # The DM already contains the receipt. Do not refund after delivery.
+        await interaction.followup.send(
+            "Your receipt was sent by DM. Please show it only to a server administrator.",
+            ephemeral=True,
+        )
+        return
+    await interaction.followup.send(
+        f"Purchase complete: **{result.pet.name}**. Check your DMs for the receipt and show it only to an administrator.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="upgrade", description="Buy upgrades with coins")
 async def slash_upgrade(interaction: discord.Interaction):
     err = require_channel(interaction, "upgrade")
     if err:
@@ -1615,7 +1783,7 @@ async def slash_upgrade(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="crafts", description="Верстак: 4 рецепта, смена каждые 30 мин")
+@bot.tree.command(name="crafts", description="Crafting bench: 4 recipes, rotating every 30 minutes")
 async def slash_crafts(interaction: discord.Interaction):
     err = require_channel(interaction, "craft")
     if err:
@@ -1631,13 +1799,13 @@ async def slash_crafts(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="craft_custom", description="[ADMIN] кастом-рецепт всем или одному")
+@bot.tree.command(name="craft_custom", description="[ADMIN] Add a custom recipe for everyone or one player")
 @app_commands.describe(
-    ingredients="3+ карты через запятую: wooden_tap, copper_tap, steel_tap",
-    result="что получится",
-    coins="стоимость монет",
-    tag="название рецепта",
-    target="пусто = для всех игроков",
+    ingredients="3+ cards separated by commas: wooden_tap, copper_tap, steel_tap",
+    result="Output card",
+    coins="Coin cost",
+    tag="Recipe name",
+    target="Empty = all players",
 )
 async def slash_craft_custom(
     interaction: discord.Interaction,
@@ -1648,25 +1816,28 @@ async def slash_craft_custom(
     target: discord.Member | None = None,
 ):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     ings = crafts.parse_ings(ingredients)
     if not ings:
-        await interaction.response.send_message("Нужно ≥3 **разных** известных карты через запятую.", ephemeral=True)
+        await interaction.response.send_message("You need at least 3 **different** known cards separated by commas.", ephemeral=True)
+        return
+    if psx_shop.resolve_pet(result):
+        await interaction.response.send_message("PSX REBORN: OG pets cannot be crafted.", ephemeral=True)
         return
     out = resolve_card(result)
     if not out:
-        await interaction.response.send_message("Неизвестная карта-результат.", ephemeral=True)
+        await interaction.response.send_message("Unknown output card.", ephemeral=True)
         return
     if out.id in UNIQUE_IDS:
-        await interaction.response.send_message("Crown Tap нельзя сделать результатом крафта.", ephemeral=True)
+        await interaction.response.send_message("Crown Tap cannot be used as a crafting result.", ephemeral=True)
         return
     ok, why = crafts.recipe_legal(ings, out.id)
     if not ok:
         await interaction.response.send_message(f"❌ {why}", ephemeral=True)
         return
     if coins < 0:
-        await interaction.response.send_message("Монеты ≥ 0.", ephemeral=True)
+        await interaction.response.send_message("Coin cost must be at least 0.", ephemeral=True)
         return
     rid = db.craft_custom_add(
         tag=tag,
@@ -1676,82 +1847,82 @@ async def slash_craft_custom(
         target_user_id=target.id if target else None,
         created_by=interaction.user.id,
     )
-    who = target.mention if target else "**всем**"
+    who = target.mention if target else "**everyone**"
     line = " + ".join(f"{CARDS[i].emoji} {CARDS[i].name}" for i in ings)
     await interaction.response.send_message(
-        f"✅ Рецепт `#{rid}` {who}: {line} + {coins}💰 → {format_card(out)}\n"
-        f"Ротация 4 слотов общая. Этот слот — кастом."
+        f"✅ Recipe `#{rid}` {who}: {line} + {coins}💰 → {format_card(out)}\n"
+        f"The 4 rotating slots are shared. This is a custom slot."
     )
 
 
-@bot.tree.command(name="craft_list", description="[ADMIN] список кастом-рецептов")
+@bot.tree.command(name="craft_list", description="[ADMIN] List custom recipes")
 async def slash_craft_list(interaction: discord.Interaction):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     rows = db.craft_custom_list(include_off=True)
     if not rows:
-        await interaction.response.send_message("Кастом-рецептов нет.", ephemeral=True)
+        await interaction.response.send_message("No custom recipes.", ephemeral=True)
         return
     lines = []
     for r in rows[:25]:
         ings = ", ".join(json.loads(r["ings"]))
         flag = "on" if r["active"] else "off"
-        who = f"<@{r['target_user_id']}>" if r["target_user_id"] else "все"
+        who = f"<@{r['target_user_id']}>" if r["target_user_id"] else "everyone"
         lines.append(f"`#{r['id']}` [{flag}] **{r['tag']}** {who}: {ings} → `{r['result']}` ({r['coins']}💰)")
     await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
 
 
-@bot.tree.command(name="craft_off", description="[ADMIN] выключить кастом-рецепт")
+@bot.tree.command(name="craft_off", description="[ADMIN] Disable a custom recipe")
 async def slash_craft_off(interaction: discord.Interaction, recipe_id: int):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     ok = db.craft_custom_off(recipe_id)
-    await interaction.response.send_message("✅ выключен" if ok else "❌ нет такого id", ephemeral=True)
+    await interaction.response.send_message("✅ Disabled" if ok else "❌ ID not found", ephemeral=True)
 
 
-@bot.tree.command(name="duel", description="Дуэль на монеты или карту — 3 раунда TAP")
-@app_commands.describe(rival="Противник", stake="50 или golden_tap или wooden_tap 2")
+@bot.tree.command(name="duel", description="Duel for coins or a card — 3 TAP rounds")
+@app_commands.describe(rival="Opponent", stake="50, golden_tap, or wooden_tap 2")
 async def slash_duel(interaction: discord.Interaction, rival: discord.Member, stake: str):
     duel_ch = ch("duel")
     if not duel_ch:
         await interaction.response.send_message(
-            f"Канал **{channel_style('duel')}** ещё не привязан: в `config.json` стоит прочерк `"
-            f"channels.duel`. Создай канал `⚔️・duel` и вставь его ID вместо `—`.",
+            f"Channel **{channel_style('duel')}** is not configured: set the ID for `channels.duel` in `config.json`. "
+            "Create the `⚔️・duel` channel and replace the `—` placeholder.",
             ephemeral=True,
         )
         return
     if interaction.channel_id != duel_ch:
         await interaction.response.send_message(
-            f"Дуэли только в <#{duel_ch}> (`{channel_style('duel')}`).",
+            f"Duels are only available in <#{duel_ch}> (`{channel_style('duel')}`).",
             ephemeral=True,
         )
         return
     await duels.start_challenge(interaction, rival, stake)
 
 
-@bot.tree.command(name="admin_give", description="[ADMIN] выдать монеты/карту")
-@app_commands.describe(target="Игрок", item="100 или legend_tap x1")
+@bot.tree.command(name="admin_give", description="[ADMIN] Grant coins or a card")
+@app_commands.describe(target="Player", item="100 or legend_tap x1")
 async def slash_admin_give(interaction: discord.Interaction, target: discord.Member, item: str):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     cm = COINS_RE.match(item.strip())
     if cm:
         total = db.add_coins(target.id, int(cm.group(1)))
-        await interaction.response.send_message(f"Выдано {cm.group(1)} 💰 → {target.mention} (баланс {total})")
+        await interaction.response.send_message(f"Granted {cm.group(1)} 💰 → {target.mention} (balance {total})")
         return
     card = resolve_card(item)
     if not card:
-        await interaction.response.send_message("Неизвестный предмет.", ephemeral=True)
+        await interaction.response.send_message("Unknown item.", ephemeral=True)
         return
     qty = db.add_card(target.id, card.id, 1)
-    await interaction.response.send_message(f"Выдана {format_card(card)} (×{qty}) → {target.mention}")
+    await interaction.response.send_message(f"Granted {format_card(card)} (×{qty}) → {target.mention}")
 
 
-@bot.tree.command(name="event_role", description="[ADMIN] выдать ивент-роль навсегда или на N секунд")
-@app_commands.describe(role="x5_coins / x2_coins / x5_luck", seconds="пусто = навсегда")
+@bot.tree.command(name="event_role", description="[ADMIN] Grant an event role permanently or for N seconds")
+@app_commands.describe(role="x5_coins / x2_coins / x5_luck", seconds="Empty = permanent")
 @app_commands.choices(
     role=[
         app_commands.Choice(name="X5 COINS", value="x5_coins"),
@@ -1767,7 +1938,7 @@ async def slash_event_role(
     seconds: int | None = None,
 ):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     result = await run_admin_tool(
         interaction.guild,
@@ -1777,13 +1948,13 @@ async def slash_event_role(
     await interaction.response.send_message(f"`{result}`")
 
 
-@bot.tree.command(name="admin_all", description="[ADMIN] выдать всем монеты / роль / карту")
-@app_commands.describe(what="coins / role / card", value="100 или x5_luck или golden_tap", seconds="для роли, пусто = навсегда")
+@bot.tree.command(name="admin_all", description="[ADMIN] Grant coins, a role, or a card to everyone")
+@app_commands.describe(what="coins / role / card", value="100, x5_luck, or golden_tap", seconds="For roles, empty = permanent")
 @app_commands.choices(
     what=[
-        app_commands.Choice(name="монеты всем", value="coins"),
-        app_commands.Choice(name="роль всем", value="role"),
-        app_commands.Choice(name="карта всем", value="card"),
+        app_commands.Choice(name="Coins for everyone", value="coins"),
+        app_commands.Choice(name="Role for everyone", value="role"),
+        app_commands.Choice(name="Card for everyone", value="card"),
     ]
 )
 async def slash_admin_all(
@@ -1793,7 +1964,7 @@ async def slash_admin_all(
     seconds: int | None = None,
 ):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     await interaction.response.defer()
     if what.value == "coins":
@@ -1809,25 +1980,25 @@ async def slash_admin_all(
     else:
         card = resolve_card(value)
         if not card:
-            await interaction.followup.send("Неизвестная карта.")
+            await interaction.followup.send("Unknown card.")
             return
         result = await run_admin_tool(interaction.guild, "give_card_all", {"card_id": card.id, "qty": 1})
     await interaction.followup.send(format_tool_result(result))
 
 
-@bot.tree.command(name="promo_create", description="[ADMIN] создать промокод")
+@bot.tree.command(name="promo_create", description="[ADMIN] Create a promo code")
 @app_commands.describe(
-    code="Код без пробелов",
+    code="Code without spaces",
     reward="coins / card / role",
-    value="100 или golden_tap или x5_luck",
-    uses="0 = безлимит",
-    seconds="для роли",
+    value="100, golden_tap, or x5_luck",
+    uses="0 = unlimited",
+    seconds="For a role",
 )
 @app_commands.choices(
     reward=[
-        app_commands.Choice(name="монеты", value="coins"),
-        app_commands.Choice(name="карта", value="card"),
-        app_commands.Choice(name="роль", value="role"),
+        app_commands.Choice(name="Coins", value="coins"),
+        app_commands.Choice(name="Card", value="card"),
+        app_commands.Choice(name="Role", value="role"),
     ]
 )
 async def slash_promo_create(
@@ -1839,7 +2010,7 @@ async def slash_promo_create(
     seconds: int | None = None,
 ):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     result = admin_create_promo(
         {
@@ -1854,25 +2025,25 @@ async def slash_promo_create(
     await interaction.response.send_message(format_tool_result(result))
 
 
-@bot.tree.command(name="promo_list", description="[ADMIN] список промокодов")
+@bot.tree.command(name="promo_list", description="[ADMIN] List promo codes")
 async def slash_promo_list(interaction: discord.Interaction):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     await interaction.response.send_message(format_tool_result(await run_admin_tool(interaction.guild, "list_promos", {})), ephemeral=True)
 
 
-@bot.tree.command(name="promo_off", description="[ADMIN] выключить промокод")
+@bot.tree.command(name="promo_off", description="[ADMIN] Disable a promo code")
 async def slash_promo_off(interaction: discord.Interaction, code: str):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     await interaction.response.send_message(
         format_tool_result(await run_admin_tool(interaction.guild, "disable_promo", {"code": code}))
     )
 
 
-@bot.tree.command(name="boss", description="Статус серверного босса")
+@bot.tree.command(name="boss", description="View the server boss status")
 async def slash_boss(interaction: discord.Interaction):
     if bosses.is_alive():
         await interaction.response.send_message(embed=bosses.embed_for(), ephemeral=True)
@@ -1880,12 +2051,12 @@ async def slash_boss(interaction: discord.Interaction):
     s = db.get_meta("boss") or {}
     left = int(s.get("next_at") or 0) - int(time.time())
     if left > 0:
-        await interaction.response.send_message(f"Босса нет. Следующий через ~{left // 60} мин.", ephemeral=True)
+        await interaction.response.send_message(f"No boss is active. The next one appears in about {left // 60} minutes.", ephemeral=True)
     else:
-        await interaction.response.send_message("Босса нет, сейчас должен заспавниться в click.", ephemeral=True)
+        await interaction.response.send_message("No boss is active; it should spawn in the click channel soon.", ephemeral=True)
 
 
-@bot.tree.command(name="boss_spawn", description="[ADMIN] призвать босса")
+@bot.tree.command(name="boss_spawn", description="[ADMIN] Spawn a boss")
 @app_commands.choices(
     tier=[
         app_commands.Choice(name="Common 500HP", value="common"),
@@ -1895,25 +2066,25 @@ async def slash_boss(interaction: discord.Interaction):
 )
 async def slash_boss_spawn(interaction: discord.Interaction, tier: app_commands.Choice[str]):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     channel = interaction.guild.get_channel(ch("tap")) if interaction.guild else None
     if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message("Нет tap-канала.", ephemeral=True)
+        await interaction.response.send_message("The click channel is not configured.", ephemeral=True)
         return
     bosses.start_boss(tier.value)
     await bosses.refresh_message(channel, force=True)
-    await interaction.response.send_message(f"Босс `{tier.value}` в <#{channel.id}>")
+    await interaction.response.send_message(f"Boss `{tier.value}` spawned in <#{channel.id}>")
 
 
-@bot.tree.command(name="refresh_lb", description="[ADMIN] обновить лидерборд сейчас")
+@bot.tree.command(name="refresh_lb", description="[ADMIN] Refresh the leaderboard now")
 async def slash_refresh_lb(interaction: discord.Interaction):
     if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
-        await interaction.response.send_message("Только ADMIN.", ephemeral=True)
+        await interaction.response.send_message("ADMIN role required.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     await refresh_leaderboard()
-    await interaction.followup.send("Лидерборд обновлён.", ephemeral=True)
+    await interaction.followup.send("Leaderboard refreshed.", ephemeral=True)
 
 
 def main() -> None:

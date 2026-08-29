@@ -8,6 +8,7 @@ import time
 import discord
 
 import database as db
+import psx_shop
 from cards import (
     CARDS,
     COMMON_IDS,
@@ -40,14 +41,16 @@ def combined_floor(ings: list[str]) -> int:
 
 
 def recipe_legal(ings: list[str], result: str) -> tuple[bool, str]:
+    if psx_shop.resolve_pet(result):
+        return False, "PSX REBORN: OG pets cannot be crafted"
     if result in ings:
-        return False, "результат не может быть одним из ингредиентов"
+        return False, "The result cannot be one of the ingredients"
     if result in UNIQUE_IDS or any(c in UNIQUE_IDS for c in ings):
-        return False, "Crown Tap нельзя крафтить"
+        return False, "Crown Tap cannot be crafted"
     floor = combined_floor(ings)
     if card_power(result) < floor:
         name = CARDS[result].name if result in CARDS else result
-        return False, f"карта слабее ингредиентов вместе (нужна сила ≥ {floor}, у {name} — {card_power(result)})"
+        return False, f"The result is weaker than the combined ingredients (minimum power {floor}; {name} has {card_power(result)})"
     return True, "ok"
 
 
@@ -80,13 +83,13 @@ def rotating_recipes(now: float | None = None) -> list[dict]:
             break
         n = len(out)
         if n == 0:
-            rec = _pick_recipe(rng, rng.sample(commons, 3), [50, 70, 90], "переплавка", "r0")
+            rec = _pick_recipe(rng, rng.sample(commons, 3), [50, 70, 90], "Smelting", "r0")
         elif n == 1:
-            rec = _pick_recipe(rng, rng.sample(commons, 3), [100, 130, 160], "сплав", "r1")
+            rec = _pick_recipe(rng, rng.sample(commons, 3), [100, 130, 160], "Alloy", "r1")
         elif n == 2:
-            rec = _pick_recipe(rng, rng.sample(commons, 2) + [rng.choice(rares)], [240, 300, 380], "редкозем", "r2")
+            rec = _pick_recipe(rng, rng.sample(commons, 2) + [rng.choice(rares)], [240, 300, 380], "Rare Earth", "r2")
         else:
-            rec = _pick_recipe(rng, rng.sample(commons, 4), [420, 540, 680], "легенда", "r3")
+            rec = _pick_recipe(rng, rng.sample(commons, 4), [420, 540, 680], "Legend", "r3")
         if rec:
             out.append(rec)
     return out
@@ -116,7 +119,7 @@ def recipe_line(rec: dict) -> str:
     ings = " + ".join(f"{CARDS[i].emoji} {CARDS[i].name}" for i in rec["ings"] if i in CARDS)
     res = CARDS.get(rec["result"])
     res_s = f"{res.emoji} **{res.name}**" if res else rec["result"]
-    mark = {"rot": "", "global": " · 🌍 всем", "personal": " · 👤 тебе"}.get(rec.get("kind") or "rot", "")
+    mark = {"rot": "", "global": " · 🌍 everyone", "personal": " · 👤 you"}.get(rec.get("kind") or "rot", "")
     return f"**{rec['tag']}**{mark} · {ings} + **{rec['coins']}** 💰\n→ {res_s}"
 
 
@@ -126,11 +129,11 @@ def embed_for(user_id: int) -> discord.Embed:
     coins = user.get("coins") or 0
     inv = user.get("inventory") or {}
     e = discord.Embed(
-        title="⚗️ Верстак",
+        title="⚗️ Crafting Bench",
         description=(
-            f"Одинаковые 4 рецепта у всех. Смена <t:{window_end()}:R>\n"
-            f"Баланс **{coins}** 💰 · ≥3 разных карты + монеты\n"
-            f"Результат **не** один из ингредиентов и **не слабее** их вместе."
+            f"The same 4 recipes are shared by everyone. Changes <t:{window_end()}:R>\n"
+            f"Balance **{coins}** 💰 · 3+ different cards + coins\n"
+            f"The result must **not** be an ingredient and must be **at least as strong** as the combined ingredients."
         ),
         color=0x1ABC9C,
     )
@@ -138,26 +141,26 @@ def embed_for(user_id: int) -> discord.Embed:
         have = [f"{CARDS[cid].emoji}×{int(inv.get(cid) or 0)}" for cid in rec["ings"] if cid in CARDS]
         e.add_field(
             name=f"#{i} · {rec['tag']}",
-            value=recipe_line(rec) + f"\nу тебя: {' '.join(have)}",
+            value=recipe_line(rec) + f"\nYou have: {' '.join(have)}",
             inline=False,
         )
     left = int(window_end() - time.time())
-    e.set_footer(text=f"Ротация через {left // 60} мин · ⚗️・crafts")
+    e.set_footer(text=f"Rotation in {left // 60} minutes · ⚗️・crafts")
     return e
 
 
 def try_craft(user_id: int, index: int) -> tuple[bool, str]:
     recs = recipes_for(user_id)
     if index < 0 or index >= len(recs):
-        return False, "нет такого рецепта"
+        return False, "Recipe not found"
     rec = recs[index]
     ings = rec["ings"]
     if len(set(ings)) < 3:
-        return False, "нужно ≥3 разных карты"
+        return False, "You need at least 3 different cards"
     custom = rec.get("kind") in ("global", "personal")
     if not custom:
         if any(c in EXCLUSIVE_IDS for c in ings) or rec["result"] in EXCLUSIVE_IDS:
-            return False, "эксклюзив нельзя крафтить в ротации"
+            return False, "Exclusive cards cannot be crafted in the rotating recipes"
     ok, why = recipe_legal(ings, rec["result"])
     if not ok:
         return False, why
@@ -165,20 +168,20 @@ def try_craft(user_id: int, index: int) -> tuple[bool, str]:
     inv = user.get("inventory") or {}
     for cid in ings:
         if cid not in CARDS:
-            return False, "битый рецепт"
+            return False, "Invalid recipe"
         if int(inv.get(cid) or 0) < 1:
-            return False, f"нет карты {CARDS[cid].name}"
+            return False, f"You do not have {CARDS[cid].name}"
     if int(user.get("coins") or 0) < rec["coins"]:
-        return False, f"нужно {rec['coins']} 💰"
+        return False, f"You need {rec['coins']} 💰"
     if not db.take_coins(user_id, rec["coins"]):
-        return False, "монеты не списались"
+        return False, "Coins could not be charged"
     for cid in ings:
         if not db.take_card(user_id, cid, 1):
             db.add_coins(user_id, rec["coins"])
-            return False, "карты не списались"
+            return False, "Cards could not be charged"
     qty = db.add_card(user_id, rec["result"], 1)
     res = CARDS[rec["result"]]
-    return True, f"⚗️ Скрафтил {format_card(res)} · теперь ×{qty}"
+    return True, f"⚗️ Crafted {format_card(res)} · now ×{qty}"
 
 
 def parse_ings(raw: str) -> list[str] | None:
@@ -207,7 +210,7 @@ class CraftView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Чужой верстак. Напиши здесь или /crafts.", ephemeral=True)
+            await interaction.response.send_message("This is someone else's crafting bench. Use your own message or /crafts.", ephemeral=True)
             return False
         return True
 

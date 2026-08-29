@@ -8,31 +8,31 @@ import database as db
 
 CATALOG = {
     "power": {
-        "title": "Сила тапа",
+        "title": "Tap Power",
         "emoji": "💪",
         "max": 8,
-        "desc": "+1 монета к каждому тапу за уровень",
+        "desc": "+1 coin per tap for each level",
         "costs": [80, 160, 280, 450, 700, 1100, 1700, 2600],
     },
     "luck": {
-        "title": "Осколок удачи",
+        "title": "Luck Shard",
         "emoji": "🍀",
         "max": 4,
-        "desc": "+1 к luck (редкие карты в roll)",
+        "desc": "+1 luck (unlocks rare cards in rolls)",
         "costs": [200, 500, 1100, 2200],
     },
     "boss": {
-        "title": "Удар по боссу",
+        "title": "Boss Damage",
         "emoji": "⚔️",
         "max": 6,
-        "desc": "+1 урона боссу за уровень",
+        "desc": "+1 boss damage per level",
         "costs": [100, 180, 300, 480, 750, 1200],
     },
     "haste": {
-        "title": "Скорость",
+        "title": "Haste",
         "emoji": "⚡",
         "max": 4,
-        "desc": "−0.3 сек кулдауна тапа (мин. 0.8с)",
+        "desc": "−0.3 seconds from tap cooldown (minimum 0.8s)",
         "costs": [150, 320, 640, 1200],
     },
 }
@@ -48,21 +48,21 @@ def cost_for(key: str, level: int) -> int | None:
 def embed_for(user_id: int) -> discord.Embed:
     coins = (db.get_user(user_id) or {}).get("coins") or 0
     e = discord.Embed(
-        title="🔧 Улучшения",
-        description=f"Баланс **{coins}** 💰 · жми кнопку, чтобы купить уровень",
+        title="🔧 Upgrades",
+        description=f"Balance **{coins}** 💰 · click a button to buy a level",
         color=0xE67E22,
     )
     for key, spec in CATALOG.items():
         lv = db.upgrade_level(user_id, key)
         nxt = cost_for(key, lv)
         bar = "●" * lv + "○" * (spec["max"] - lv)
-        tail = "MAX" if nxt is None else f"след. **{nxt}** 💰"
+        tail = "MAX" if nxt is None else f"next **{nxt}** 💰"
         e.add_field(
             name=f"{spec['emoji']} {spec['title']}  `{bar}`",
-            value=f"{spec['desc']}\nур. **{lv}/{spec['max']}** · {tail}",
+            value=f"{spec['desc']}\nlevel **{lv}/{spec['max']}** · {tail}",
             inline=False,
         )
-    e.set_footer(text="Только канал 🔧・upgrades")
+    e.set_footer(text="Only available in 🔧・upgrades")
     return e
 
 
@@ -75,7 +75,7 @@ class UpgradeView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Это чужой магазин. Напиши в канал или /upgrade.", ephemeral=True)
+            await interaction.response.send_message("This is someone else's shop. Use your own message or /upgrade.", ephemeral=True)
             return False
         return True
 
@@ -90,10 +90,10 @@ class BuyButton(discord.ui.Button):
         lv = db.upgrade_level(uid, self.key)
         price = cost_for(self.key, lv)
         if price is None:
-            await interaction.response.send_message("Уже максимум.", ephemeral=True)
+            await interaction.response.send_message("Already at maximum.", ephemeral=True)
             return
         if not db.take_coins(uid, price):
-            await interaction.response.send_message(f"Нужно **{price}** 💰", ephemeral=True)
+            await interaction.response.send_message(f"You need **{price}** 💰", ephemeral=True)
             return
         db.set_upgrade_level(uid, self.key, lv + 1)
         view = UpgradeView(uid)

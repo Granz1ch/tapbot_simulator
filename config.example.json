@@ -11,7 +11,8 @@
     "promocodes": 0,
     "duel": 0,
     "upgrade": "—",
-    "craft": "—"
+    "craft": "—",
+    "psx_shop": 1542920557387841576
   },
 
   "channel_names": {
@@ -23,7 +24,8 @@
     "promocodes": "🎁・promos",
     "duel": "⚔️・duel",
     "upgrade": "🔧・upgrades",
-    "craft": "⚗️・crafts"
+    "craft": "⚗️・crafts",
+    "psx_shop": "psx-shop"
   },
 
   "roles": {
@@ -32,7 +34,8 @@
     "player": 0,
     "x5_coins": 0,
     "x2_coins": 0,
-    "x5_luck": 0
+    "x5_luck": 0,
+    "x2_luck": 0
   },
 
   "ai": {

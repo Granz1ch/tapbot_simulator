@@ -58,88 +58,88 @@ def start_brawl(minutes: float) -> float:
 def start_enchant(user_id: int, card_id: str, kind: str, tier: int) -> tuple[bool, str]:
     card = CARDS.get(card_id)
     if not card:
-        return False, "нет карты"
+        return False, "Card not found"
     if card_id in UNIQUE_IDS or card_id == CROWN_CARD_ID:
-        return False, "Crown нельзя чарить"
+        return False, "Crown Tap cannot be enchanted"
     mx = max_tier(card.rarity)
     if tier < 1 or tier > mx:
-        return False, f"для {card.rarity} максимум ступень {mx}"
+        return False, f"Maximum tier for {card.rarity}: {mx}"
     if kind not in ("coins", "luck"):
-        return False, "coins или luck"
+        return False, "Use coins or luck"
     if db.enchant_busy(user_id):
-        return False, "уже идёт зачарование"
+        return False, "An enchantment is already in progress"
     price = CHARM_PRICE.get(card.rarity, {}).get(tier)
     if price is None:
-        return False, "нет цены"
+        return False, "No price is configured"
     if not db.take_card(user_id, card_id, 1):
-        return False, "нет свободной карты (не зачарённой)"
+        return False, "You do not have an unenchanted copy of this card"
     if not db.take_coins(user_id, price):
         db.add_card(user_id, card_id, 1)
-        return False, f"нужно {price} 💰"
+        return False, f"You need {price} 💰"
     ready = time.time() + CHARM_WAIT[tier]
     db.enchant_start(user_id, card_id, kind, tier, ready)
-    return True, f"зачарование {card.emoji} **{card.name}** {kind} I{'I'* (tier-1)} · готово <t:{int(ready)}:R>"
+    return True, f"Enchantment {card.emoji} **{card.name}** {kind} I{'I'* (tier-1)} · ready <t:{int(ready)}:R>"
 
 
 def cancel_enchant(user_id: int) -> tuple[bool, str]:
     row = db.enchant_cancel(user_id)
     if not row:
-        return False, "нечего отменять"
+        return False, "There is no active enchantment to cancel"
     db.add_card(user_id, row["card_id"], 1)
-    return True, "карта возвращена, монеты не возвращаются"
+    return True, "The card was returned; coins are not refunded"
 
 
 def farm_shard(user_id: int, tap_gain: int) -> tuple[bool, str]:
     minted = db.shard_minted()
     if minted >= SHARD_CAP:
-        return False, "пул осколков исчерпан (10 000)"
+        return False, "The shard pool is empty (10,000)"
     cost = max(3, int(tap_gain))
     if not db.take_coins(user_id, cost):
-        return False, f"нужно {cost} 💰"
+        return False, f"You need {cost} 💰"
     if not db.try_mint_shards(1):
         db.add_coins(user_id, cost)
-        return False, "пул осколков исчерпан (10 000)"
+        return False, "The shard pool is empty (10,000)"
     total = db.add_shards(user_id, 1)
     left = SHARD_CAP - db.shard_minted()
-    return True, f"+1 💎 (у тебя {total}) · −{cost} 💰 · в пуле {left}"
+    return True, f"+1 💎 (you have {total}) · −{cost} 💰 · {left} left in the pool"
 
 
 def exchange_crystal(user_id: int) -> tuple[bool, str]:
     if db.shard_minted() + 2 > SHARD_CAP:
-        return False, "в пуле нет 2 осколков"
+        return False, "The pool does not have 2 shards left"
     if not db.take_card(user_id, "crystal_tap", 1):
-        return False, "нет Crystal Tap (обычного, не зачарованного)"
+        return False, "You do not have a regular, unenchanted Crystal Tap"
     if not db.try_mint_shards(2):
         db.add_card(user_id, "crystal_tap", 1)
-        return False, "пул исчерпан"
+        return False, "The pool is empty"
     total = db.add_shards(user_id, 2)
-    return True, f"−1 Crystal Tap → +2 💎 (у тебя {total})"
+    return True, f"−1 Crystal Tap → +2 💎 (you have {total})"
 
 
 def buy_slot(user_id: int, kind: str, value: float) -> tuple[bool, str]:
     if value not in SHOP:
-        return False, "ступень: 1.25 / 1.5 / 1.75 / 2"
+        return False, "Available tiers: 1.25 / 1.5 / 1.75 / 2"
     if kind not in ("coins", "luck"):
-        return False, "coins или luck"
+        return False, "Use coins or luck"
     cur = shop_k(user_id, kind)
     if value <= cur + 1e-9:
-        return False, "уже есть такая или выше"
+        return False, "You already have this tier or a higher one"
     price = SHOP[value] - SHOP.get(cur, 0)
     if price <= 0:
         price = SHOP[value]
     if not db.take_shards(user_id, price):
-        return False, f"нужно {price} 💎"
+        return False, f"You need {price} 💎"
     db.set_shard_slot(user_id, kind, value)
-    return True, f"слот {kind} ×{value} · −{price} 💎"
+    return True, f"{kind} slot ×{value} · −{price} 💎"
 
 
 def apply_ref(user_id: int, code: str) -> tuple[bool, str]:
     by_user = db.ref_by_code(code)
     if not by_user:
-        return False, "нет такого кода"
+        return False, "Referral code not found"
     if not db.ref_bind(user_id, by_user):
-        return False, "код уже привязан или это свой"
-    return True, f"код принят. награда после первого тапа (PLAYER)."
+        return False, "This code is already linked or belongs to you"
+    return True, f"Code accepted. The reward is granted after the first tap (PLAYER)."
 
 
 def payout_ref(user_id: int) -> str | None:
@@ -151,8 +151,8 @@ def payout_ref(user_id: int) -> str | None:
     extra = ""
     if db.try_mint_shards(2):
         db.add_shards(by_user, 2)
-        extra = " · пригласившему +2 💎"
-    return f"реферал: тебе +25 💰, <@{by_user}> +50 💰{extra}"
+        extra = " · inviter gets +2 💎"
+    return f"Referral: you get +25 💰, <@{by_user}> gets +50 💰{extra}"
 
 
 class EnchantView(discord.ui.View):
@@ -164,7 +164,7 @@ class EnchantView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Не твоё меню.", ephemeral=True)
+            await interaction.response.send_message("This menu is not yours.", ephemeral=True)
             return False
         return True
 
@@ -183,20 +183,20 @@ class EnchantSelect(discord.ui.Select):
                     label=f"{card.name} ×{qty}"[:100],
                     value=cid,
                     emoji=card.emoji,
-                    description=f"{card.rarity} · макс. {max_tier(card.rarity)} ст.",
+                    description=f"{card.rarity} · max tier {max_tier(card.rarity)}",
                 )
             )
         if not opts:
-            opts = [discord.SelectOption(label="нет карт для чара", value="none")]
-        super().__init__(placeholder="Карта для зачарования", options=opts)
+            opts = [discord.SelectOption(label="No cards available for enchantment", value="none")]
+        super().__init__(placeholder="Choose a card to enchant", options=opts)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         cid = self.values[0]
         if cid == "none":
-            await interaction.response.send_message("Нет подходящих карт.", ephemeral=True)
+            await interaction.response.send_message("No eligible cards found.", ephemeral=True)
             return
         await interaction.response.send_message(
-            f"Ступень и тип для {CARDS[cid].emoji} **{CARDS[cid].name}**",
+            f"Choose a tier and type for {CARDS[cid].emoji} **{CARDS[cid].name}**",
             view=EnchantConfirm(interaction.user.id, cid),
             ephemeral=True,
         )
@@ -231,7 +231,7 @@ class GoEnchant(discord.ui.Button):
 
 class CancelEnchant(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Отмена ожидания", style=discord.ButtonStyle.danger)
+        super().__init__(label="Cancel enchantment", style=discord.ButtonStyle.danger)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         ok, text = cancel_enchant(interaction.user.id)
@@ -241,22 +241,22 @@ class CancelEnchant(discord.ui.Button):
 def enchant_embed(user_id: int) -> discord.Embed:
     busy = db.enchant_busy(user_id)
     ready = db.enchant_list(user_id, ready_only=True)
-    e = discord.Embed(title="✨ Чары", color=0xE8D44D)
+    e = discord.Embed(title="✨ Enchantments", color=0xE8D44D)
     if busy:
         e.add_field(
-            name="В процессе",
+            name="In progress",
             value=f"{CARDS.get(busy['card_id']).emoji if busy['card_id'] in CARDS else busy['card_id']} "
-            f"{busy['kind']} ст.{busy['tier']} · <t:{int(busy['ready_at'])}:R>",
+            f"{busy['kind']} tier {busy['tier']} · <t:{int(busy['ready_at'])}:R>",
             inline=False,
         )
     if ready:
         lines = [
-            f"{CARDS[r['card_id']].emoji} {CARDS[r['card_id']].name} · {r['kind']} ст.{r['tier']}"
+            f"{CARDS[r['card_id']].emoji} {CARDS[r['card_id']].name} · {r['kind']} tier {r['tier']}"
             for r in ready
             if r["card_id"] in CARDS
         ]
-        e.add_field(name="Готовые", value="\n".join(lines)[:1000], inline=False)
-    e.set_footer(text="Один процесс. Отмена — карта назад, монеты нет. Crown нельзя.")
+        e.add_field(name="Ready", value="\n".join(lines)[:1000], inline=False)
+    e.set_footer(text="One process at a time. Cancel returns the card, not the coins. Crown cannot be enchanted.")
     return e
 
 
@@ -270,7 +270,7 @@ class ShardShop(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Не твоё меню.", ephemeral=True)
+            await interaction.response.send_message("This menu is not yours.", ephemeral=True)
             return False
         return True
 
@@ -289,10 +289,10 @@ class BuyShard(discord.ui.Button):
 def shard_embed(user_id: int) -> discord.Embed:
     slots = db.shard_slots(user_id)
     e = discord.Embed(
-        title="💎 Осколки",
+        title="💎 Shards",
         description=(
-            f"У тебя **{db.shards_of(user_id)}** 💎 · пул {db.shard_minted()}/{SHARD_CAP}\n"
-            f"слот монет ×{slots['coins']} · слот удачи ×{slots['luck']}"
+            f"You have **{db.shards_of(user_id)}** 💎 · pool {db.shard_minted()}/{SHARD_CAP}\n"
+            f"coin slot ×{slots['coins']} · luck slot ×{slots['luck']}"
         ),
         color=0x5DADE2,
     )
